@@ -1,41 +1,41 @@
-# Siyuan Chinese Chess
+# 思远象棋
 
-A Chinese chess (Xiangqi) game built with Python + Pygame Zero, with built-in AI.
+基于 Python + Pygame Zero 的中国象棋项目，内置 AI 对弈，支持三档难度。
 
-## Features
+## 功能特性
 
-- Three difficulty levels: Easy / Normal / Master
-- Human-first and AI-first modes
-- Undo
-- Check warning banner
-- Chinese piece labels (font fallback included)
+- 三档难度：`简单`、`正常`、`大师`
+- 支持人先手 / AI 先手
+- 支持悔棋
+- 将军红色横幅提示
+- 中文棋子显示（含字体回退）
 
-## Requirements
+## 运行环境
 
 - Python 3.10+
-- pgzero
-- pygame-ce
+- `pgzero`
+- `pygame-ce`
 
-## Install
+## 安装依赖
 
 ```bash
 pip install pgzero pygame-ce
 ```
 
-## Run
+## 启动方式
 
 ```bash
 python Chinese_Chess_Python.py
 ```
 
-## Controls
+## 操作说明
 
-- Mouse: select and move pieces
-- `U`: undo
-- `A`: new game (AI first)
-- `R`: new game (human first)
-- `E` / `N` / `M`: switch difficulty
+- 鼠标：选择棋子并落子
+- `U`：悔棋
+- `A`：AI 先手新局
+- `R`：人先手新局
+- `E` / `N` / `M`：切换 `简单 / 正常 / 大师`
 
-## License
+## 开源协议
 
-MIT. See `LICENSE`.
+MIT，见 `LICENSE`。
