@@ -4,7 +4,9 @@
 
 import pgzrun
 import pygame
+import os
 import random
+import sys
 import time
 import math
 from array import array
@@ -21,6 +23,19 @@ except Exception:
 WIDTH = 900
 HEIGHT = 1050
 TITLE = "\u601d\u8fdc\u8c61\u68cb"
+
+
+def resource_path(relative_path: str) -> str:
+    if getattr(sys, "frozen", False):
+        base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
+    else:
+        base_path = os.path.abspath(os.path.dirname(__file__)) if "__file__" in globals() else os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
+_ICON_PATH = resource_path("favicon.ico")
+ICON = _ICON_PATH if os.path.exists(_ICON_PATH) else None
+
 BOARD_SIZE = 10
 BOARD_WIDTH = 9
 MARGIN = 50
