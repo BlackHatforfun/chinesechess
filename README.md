@@ -36,6 +36,18 @@ python Chinese_Chess_Python.py
 - `R`：人先手新局
 - `E` / `N` / `M`：切换 `简单 / 正常 / 大师`
 
+## Windows x64 EXE 打包
+
+项目内置图标文件 `favicon.ico`，可直接一键打包：
+
+```bat
+build_windows_x64.bat
+```
+
+打包后产物位于：
+
+- `dist\SiyuanXiangqi.exe`
+
 ## 开源协议
 
 MIT，见 `LICENSE`。
