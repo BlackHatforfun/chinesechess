@@ -78,6 +78,11 @@ def board_to_screen(row: int, col: int) -> Tuple[int, int]:
     return int(round(x)), int(round(y))
 
 
+def board_pos_text(pos: Tuple[int, int]) -> str:
+    row, col = pos
+    return f"({row + 1},{col + 1})"
+
+
 def screen_to_board(pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:
     x, y = pos
     col = int(round((x - BOARD_LEFT) / X_STEP))
@@ -808,6 +813,7 @@ class AdvancedAIEngine:
     SINGULAR_MARGIN_MAX = 140
     SINGULAR_ALT_LIMIT = 4
     SINGULAR_TIME_RATIO_LIMIT = 0.30
+    OPENING_VARIATION_MIN_DEPTH = 2
 
     def __init__(self, difficulty: Difficulty = Difficulty.NORMAL):
         depth_map = {
@@ -823,6 +829,7 @@ class AdvancedAIEngine:
             Difficulty.MASTER: 8.0,
         }
 
+        self.difficulty = difficulty
         self.max_depth = depth_map[difficulty]
         self.time_limit = time_map[difficulty]
         self.quiescence_depth = 5 if difficulty in (Difficulty.HARD, Difficulty.MASTER) else 3
@@ -855,12 +862,14 @@ class AdvancedAIEngine:
         self.last_search_depth = 0
         self.last_search_time = 0.0
         self.last_search_score = 0
+        self._root_last_scores: Dict[Move, int] = {}
+        self._opening_rng = random.Random()
 
     def get_all_legal_moves(self, board: ChessBoard, player: Player) -> List[Move]:
         moves = self._generate_legal_moves(board, player)
         return self._order_moves(board, moves, player, 0, None, None, None)
 
-    def find_best_move(self, board: ChessBoard, player: Player) -> Optional[Move]:
+    def find_best_move(self, board: ChessBoard, player: Player, move_count: int = 0) -> Optional[Move]:
         legal_moves = self._generate_legal_moves(board, player)
         if not legal_moves:
             self.last_search_nodes = 0
@@ -882,6 +891,8 @@ class AdvancedAIEngine:
         self._decay_capture_history()
         self.pv_hint = [None for _ in range(self.MAX_PLY)]
         completed_depth = 0
+        final_root_scores: Dict[Move, int] = {}
+        allow_opening_variation = self._should_apply_opening_variation(move_count)
 
         for depth in range(1, self.max_depth + 1):
             alpha = -self.INF
@@ -893,12 +904,14 @@ class AdvancedAIEngine:
                 beta = best_score + window
 
             self._clear_pv_lengths()
+            self._root_last_scores = {}
             score, move = self._negamax(board, depth, alpha, beta, player, 0, root_hash, True)
             if self.stop_search:
                 break
 
             if score <= alpha or score >= beta:
                 self._clear_pv_lengths()
+                self._root_last_scores = {}
                 score, move = self._negamax(board, depth, -self.INF, self.INF, player, 0, root_hash, True)
                 if self.stop_search:
                     break
@@ -911,6 +924,15 @@ class AdvancedAIEngine:
                 best_score = score
                 completed_depth = depth
                 self._refresh_pv_hint()
+                final_root_scores = dict(self._root_last_scores)
+
+        if (
+            allow_opening_variation
+            and completed_depth >= self.OPENING_VARIATION_MIN_DEPTH
+            and final_root_scores
+            and abs(best_score) < self.MATE_SCORE // 4
+        ):
+            best_move = self._choose_opening_variation_move(best_move, best_score, final_root_scores)
 
         self.last_search_time = time.perf_counter() - self.search_start
         self.last_search_nodes = self.nodes
@@ -918,6 +940,76 @@ class AdvancedAIEngine:
         self.last_search_score = best_score if best_score > -self.INF // 2 else 0
         self._prune_transposition_table_if_needed()
         return best_move
+
+    def _should_apply_opening_variation(self, move_count: int) -> bool:
+        max_ply_map = {
+            Difficulty.EASY: 12,
+            Difficulty.NORMAL: 10,
+            Difficulty.HARD: 8,
+            Difficulty.MASTER: 6,
+        }
+        max_ply = max_ply_map.get(self.difficulty, 8)
+        return move_count <= max_ply
+
+    def _choose_opening_variation_move(
+        self,
+        best_move: Move,
+        best_score: int,
+        root_scores: Dict[Move, int],
+    ) -> Move:
+        margin_map = {
+            Difficulty.EASY: 140,
+            Difficulty.NORMAL: 100,
+            Difficulty.HARD: 72,
+            Difficulty.MASTER: 48,
+        }
+        temp_map = {
+            Difficulty.EASY: 80.0,
+            Difficulty.NORMAL: 58.0,
+            Difficulty.HARD: 42.0,
+            Difficulty.MASTER: 28.0,
+        }
+        candidate_cap_map = {
+            Difficulty.EASY: 7,
+            Difficulty.NORMAL: 6,
+            Difficulty.HARD: 5,
+            Difficulty.MASTER: 4,
+        }
+
+        margin = margin_map.get(self.difficulty, 80)
+        temperature = temp_map.get(self.difficulty, 42.0)
+        candidate_cap = candidate_cap_map.get(self.difficulty, 5)
+
+        if best_move not in root_scores:
+            root_scores[best_move] = best_score
+
+        candidates = [
+            (move, score)
+            for move, score in root_scores.items()
+            if score >= best_score - margin
+        ]
+        if len(candidates) <= 1:
+            return best_move
+
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        candidates = candidates[:candidate_cap]
+
+        weights: List[float] = []
+        for _, score in candidates:
+            delta = score - best_score
+            weights.append(math.exp(delta / temperature))
+
+        total = sum(weights)
+        if total <= 1e-9:
+            return best_move
+
+        pick = self._opening_rng.random() * total
+        running = 0.0
+        for idx, (move, _) in enumerate(candidates):
+            running += weights[idx]
+            if pick <= running:
+                return move
+        return candidates[-1][0]
 
     def _negamax(
         self,
@@ -1207,6 +1299,9 @@ class AdvancedAIEngine:
 
             if self.stop_search:
                 return 0, None
+
+            if ply == 0:
+                self._root_last_scores[move] = score
 
             if score > best_score:
                 best_score = score
@@ -2223,20 +2318,23 @@ class AdvancedAIEngine:
 class ChessGame:
     def __init__(self, difficulty: Difficulty = Difficulty.NORMAL, ai_first: bool = False):
         self.difficulty = difficulty
-        self.human_player = Player.BLACK if ai_first else Player.RED
+        # UX: player always controls Red (bottom side); "AI first" only changes opening side.
+        self.human_player = Player.RED
+        self.ai_starts = ai_first
         self.board = ChessBoard()
         self.ai = AdvancedAIEngine(difficulty)
-        self.current_player = Player.RED
+        self.current_player = Player.BLACK if ai_first else Player.RED
         self.selected_pos: Optional[Tuple[int, int]] = None
         self.valid_moves: List[Tuple[int, int]] = []
         self.ai_thinking = False
         self.game_over = False
         self.winner: Optional[Player] = None
-        self.move_history: List[Tuple[Tuple[int, int], Tuple[int, int], Optional[Piece]]] = []
+        self.move_history: List[Tuple[Tuple[int, int], Tuple[int, int], Optional[Piece], Player]] = []
         self.ai_time = 0.0
         self.ai_nodes = 0
         self.ai_depth = 0
         self.in_check_player: Optional[Player] = None
+        self.ai_move_hint_text = ""
 
     @property
     def ai_player(self) -> Player:
@@ -2244,11 +2342,11 @@ class ChessGame:
 
     def reset(self, ai_first: Optional[bool] = None):
         if ai_first is not None:
-            self.human_player = Player.BLACK if ai_first else Player.RED
+            self.ai_starts = ai_first
 
         self.board = ChessBoard()
         self.ai = AdvancedAIEngine(self.difficulty)
-        self.current_player = Player.RED
+        self.current_player = Player.BLACK if self.ai_starts else Player.RED
         self.selected_pos = None
         self.valid_moves = []
         self.ai_thinking = False
@@ -2259,6 +2357,7 @@ class ChessGame:
         self.ai_nodes = 0
         self.ai_depth = 0
         self.in_check_player = None
+        self.ai_move_hint_text = ""
 
     def make_move(self, from_pos: Tuple[int, int], to_pos: Tuple[int, int]) -> bool:
         piece = self.board.get_piece(from_pos[0], from_pos[1])
@@ -2267,22 +2366,23 @@ class ChessGame:
         if not MoveValidator.is_valid_move(self.board, from_pos, to_pos):
             return False
 
+        mover = self.current_player
         captured = self.board.get_piece(to_pos[0], to_pos[1])
         self.board.set_piece(from_pos[0], from_pos[1], None)
         self.board.set_piece(to_pos[0], to_pos[1], piece)
-        self.move_history.append((from_pos, to_pos, captured))
+        self.move_history.append((from_pos, to_pos, captured, mover))
         play_move_sound(captured is not None)
 
         if captured and captured.type == PieceType.GENERAL:
             self.game_over = True
-            self.winner = self.current_player
+            self.winner = mover
             self.in_check_player = None
             return True
 
         opponent = self.get_opponent()
         if self._is_checkmate(opponent):
             self.game_over = True
-            self.winner = self.current_player
+            self.winner = mover
             self.in_check_player = None
             return True
 
@@ -2333,7 +2433,12 @@ class ChessGame:
         if not self.move_history:
             return False
 
-        from_pos, to_pos, captured = self.move_history[-1]
+        move_entry = self.move_history[-1]
+        if len(move_entry) >= 4:
+            from_pos, to_pos, captured, mover = move_entry
+        else:
+            from_pos, to_pos, captured = move_entry  # backward compatibility
+            mover = Player.RED if (len(self.move_history) - 1) % 2 == 0 else Player.BLACK
         moving_piece = self.board.get_piece(to_pos[0], to_pos[1])
         if moving_piece is None:
             return False
@@ -2341,7 +2446,7 @@ class ChessGame:
 
         self.board.set_piece(to_pos[0], to_pos[1], captured)
         self.board.set_piece(from_pos[0], from_pos[1], moving_piece)
-        self.current_player = Player.BLACK if self.current_player == Player.RED else Player.RED
+        self.current_player = mover
         self.selected_pos = None
         self.valid_moves = []
         self.game_over = False
@@ -2365,15 +2470,33 @@ class ChessGame:
                 break
         if undone > 0:
             play_move_sound(False)
+            self.ai_move_hint_text = ""
         return undone > 0
 
     def get_ai_move(self) -> Optional[Move]:
         start_time = time.perf_counter()
-        move = self.ai.find_best_move(self.board, self.current_player)
+        move = self.ai.find_best_move(self.board, self.current_player, len(self.move_history))
         self.ai_time = time.perf_counter() - start_time
         self.ai_nodes = self.ai.last_search_nodes
         self.ai_depth = self.ai.last_search_depth
         return move
+
+    def set_ai_move_hint(
+        self,
+        from_pos: Tuple[int, int],
+        to_pos: Tuple[int, int],
+        moving_piece: Piece,
+        captured_piece: Optional[Piece],
+    ):
+        side_text = "黑方" if moving_piece.player == Player.BLACK else "红方"
+        piece_text = piece_label(moving_piece)
+        capture_text = f"，吃{piece_label(captured_piece)}" if captured_piece is not None else ""
+        self.ai_move_hint_text = (
+            f"AI落子：{side_text}{piece_text} {board_pos_text(from_pos)} -> {board_pos_text(to_pos)}{capture_text}"
+        )
+
+    def get_ai_move_hint(self) -> str:
+        return self.ai_move_hint_text
 
 
 game = ChessGame(Difficulty.NORMAL)
@@ -2450,7 +2573,7 @@ def draw_board_marks():
         draw_cross_mark(board_to_screen(r, c))
 
 
-def get_capture_counts(move_history: List[Tuple[Tuple[int, int], Tuple[int, int], Optional[Piece]]]):
+def get_capture_counts(move_history: List[Tuple[Tuple[int, int], Tuple[int, int], Optional[Piece], Player]]):
     red_captures: Dict[PieceType, int] = {}
     black_captures: Dict[PieceType, int] = {}
 
@@ -2459,13 +2582,18 @@ def get_capture_counts(move_history: List[Tuple[Tuple[int, int], Tuple[int, int]
         if captured is None:
             continue
 
-        # 绾㈡柟鍏堟墜锛屽伓鏁版涓虹孩鏂硅蛋瀛?        if move_index % 2 == 0:
+        # Prefer explicit mover side; keep fallback for compatibility with old records.
+        if len(move_entry) >= 4:
+            mover = move_entry[3]
+        else:
+            mover = Player.RED if move_index % 2 == 0 else Player.BLACK
+
+        if mover == Player.RED:
             red_captures[captured.type] = red_captures.get(captured.type, 0) + 1
         else:
             black_captures[captured.type] = black_captures.get(captured.type, 0) + 1
 
     return red_captures, black_captures
-
 
 def format_capture_text(captures: Dict[PieceType, int], captured_side: Player) -> str:
     if not captures:
@@ -2573,18 +2701,18 @@ def draw():
     pygame.draw.rect(screen.surface, (120, 86, 48), human_first_button, 1)
     draw_ui_text("\u6094\u68cb(U)", undo_button.center, color=(40, 28, 18), size=18, bold=True, center=True)
     draw_ui_text(
-        "AI\u5148\u624b\u65b0\u5c40(A)",
+        "AI\u5148\u8d70\u65b0\u5c40(A) \u4f60\u6267\u7ea2",
         ai_first_button.center,
         color=(40, 28, 18),
-        size=18,
+        size=16,
         bold=True,
         center=True,
     )
     draw_ui_text(
-        "\u4eba\u5148\u624b\u65b0\u5c40(R)",
+        "\u4eba\u5148\u8d70\u65b0\u5c40(R) \u4f60\u6267\u7ea2",
         human_first_button.center,
         color=(40, 28, 18),
-        size=18,
+        size=16,
         bold=True,
         center=True,
     )
@@ -2703,7 +2831,8 @@ def draw():
     )
 
     if game.move_history:
-        last_from, last_to, _ = game.move_history[-1]
+        last_entry = game.move_history[-1]
+        last_from, last_to = last_entry[0], last_entry[1]
         fx, fy = board_to_screen(last_from[0], last_from[1])
         tx, ty = board_to_screen(last_to[0], last_to[1])
         pygame.draw.line(screen.surface, (66, 126, 86), (fx, fy), (tx, ty), 2)
@@ -2751,10 +2880,12 @@ def draw():
     }
     side_text = "\u7ea2\u65b9" if game.current_player == Player.RED else "\u9ed1\u65b9"
     human_text = "\u7ea2\u65b9" if game.human_player == Player.RED else "\u9ed1\u65b9"
+    first_text = "AI\u5148\u8d70" if game.ai_starts else "\u4eba\u5148\u8d70"
     status_text = (
         f"\u96be\u5ea6: {diff_map.get(game.difficulty.name, game.difficulty.name)}"
         f" | \u5f53\u524d: {side_text}"
         f" | \u73a9\u5bb6: {human_text}"
+        f" | {first_text}"
     )
     if game.ai_thinking:
         status_text += " | AI\u601d\u8003\u4e2d..."
@@ -2792,6 +2923,18 @@ def draw():
         size=18,
     )
 
+    ai_hint = game.get_ai_move_hint()
+    if ai_hint:
+        hint_rect = pygame.Rect(12, HEIGHT - 82, WIDTH - 24, 28)
+        screen.draw.filled_rect(hint_rect, (246, 228, 192))
+        pygame.draw.rect(screen.surface, (132, 94, 52), hint_rect, 1)
+        draw_ui_text(
+            ai_hint,
+            (22, HEIGHT - 79),
+            color=(70, 36, 16),
+            size=18,
+        )
+
     if game.game_over:
         overlay_w = 360
         overlay_h = 118
@@ -2808,7 +2951,7 @@ def draw():
             center=True,
         )
         draw_ui_text(
-            "\u6309 R \u4eba\u5148\u624b\u65b0\u5c40 | \u6309 A AI\u5148\u624b\u65b0\u5c40",
+            "\u6309 R \u4eba\u5148\u8d70\u65b0\u5c40(\u4f60\u6267\u7ea2) | \u6309 A AI\u5148\u8d70\u65b0\u5c40(\u4f60\u6267\u7ea2)",
             (overlay_rect.centerx, overlay_rect.y + 78),
             color=(48, 36, 24),
             size=18,
@@ -2884,7 +3027,11 @@ def update():
         game.ai_thinking = True
         move = game.get_ai_move()
         if move:
-            game.make_move(move[0], move[1])
+            from_pos, to_pos = move
+            moving_piece = game.board.get_piece(from_pos[0], from_pos[1])
+            captured_piece = game.board.get_piece(to_pos[0], to_pos[1])
+            if game.make_move(from_pos, to_pos) and moving_piece is not None:
+                game.set_ai_move_hint(from_pos, to_pos, moving_piece, captured_piece)
         else:
             # 防御性兜底：若当前局面 AI 无合法着法，直接判负结束，避免空转。
             legal = game.ai.get_all_legal_moves(game.board, game.current_player)
